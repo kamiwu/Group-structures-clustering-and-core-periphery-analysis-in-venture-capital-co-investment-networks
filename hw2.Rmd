@@ -1,0 +1,298 @@
+---
+title: "Social Network Analytics Homework 2"
+output: html_notebook
+---
+
+Load libraries and data sets. 
+```{r}
+library(igraph)
+library(dplyr)
+library(readxl)
+library(gtools)
+
+data1 <- read.csv('C:/MSBA/MSBA Files/socialnetwork/homework/hw2/Funding_events_7.14.csv')
+data2 <- read_xlsx('C:/MSBA/MSBA Files/socialnetwork/homework/hw2/Funding_events_7.14_page2.xlsx')
+```
+Clean data, only extract columns of starup companies, investors and deal date. Transform the format of date. Combine data from two files together.
+```{r}
+dt1 <- data1 %>% select(Portfolio.Company.Name, Investors, Deal.Date) %>% filter(!is.na(Investors) & Investors != "")
+dt2 <- data2 %>% select('Portfolio Company Name', 'Investors', 'Deal Date') %>% filter(!is.na(Investors) & Investors != "")
+names(dt2)[1]<-"Portfolio.Company.Name"
+names(dt2)[3]<-"Deal.Date"
+dt1$Deal.Date <- as.POSIXct(dt1$Deal.Date, format = "%m/%d/%y")
+dt2$Deal.Date <- as.POSIXct(dt2$Deal.Date, format = "%Y-%m-%d")
+df <- rbind(dt1, dt2)
+```
+Split investors column by comma. I found some investors have comma between its name and Inc./LLC/Ltd/LLC/LP, so I exclude them, and I'll do the same thing for the outcomes data set later.
+```{r}
+df[,2] <- gsub(', Inc', '', df[,2])
+df[,2] <- gsub(', Inc.', '', df[,2])
+df[,2] <- gsub(', LLC', '', df[,2])
+df[,2] <- gsub(', Ltd', '', df[,2])
+df[,2] <- gsub(', Ltd.', ' Ltd.', df[,2])
+df[,2] <- gsub(',Ltd', '', df[,2])
+df[,2] <- gsub(', L.L.C', '', df[,2])
+df[,2] <- gsub(', L.L.C.', '', df[,2])
+df[,2] <- gsub(', LP', '', df[,2])
+investor <- strsplit(as.character(df$Investors), ", ")
+```
+Use combinations to find unique relationship of two investors.
+```{r}
+relation <- data.frame()
+for (i in 1:length(investor)) {
+  if (length(investor[[i]]) > 1) {
+    trans <- as.vector(investor[[i]])
+    agent <- relation
+    relation <- cbind.data.frame(date = df$Deal.Date[i],combinations(n=length(trans), r=2, v=trans))
+    relation <- rbind.data.frame(agent, relation)
+  }
+}
+colnames(relation) <- c('date','X1','X2')
+```
+## Question 1 -- A
+Drop all duplicates of relationship:
+```{r}
+relation1 <- relation[order(relation$X1,relation$X2),]
+relation1 <- relation1[!duplicated(relation1[,2:3]),]
+```
+Make a graph: 
+```{r}
+investedgelist <- cbind.data.frame(relation$X1,relation$X2)
+investg <- graph.data.frame(investedgelist, directed = FALSE)
+```
+Find max closeness:
+```{r results='hide'}
+allclose <- closeness(investg, vids = V(investg), mode ="all", normalized = TRUE)
+```
+```{r}
+which.max(allclose)
+```
+The outcome shows that **Intel Capital is the center of the venture capital firm network as of July 2014.**
+
+## Question 1 -- B
+Build the matrix of the distances between each node:
+```{r}
+pathmatrix <- shortest.paths(investg, v=V(investg), to=V(investg))
+```
+Compute the average shortest path for each node:
+```{r}
+mean <- c()
+for (i in 1:nrow(pathmatrix)) {
+  x <- pathmatrix[i,]
+  x[x == Inf] <- nrow(pathmatrix)
+  mean <- cbind(mean,sum(x)/(length(x)-1))
+}
+```
+Find which node has the lowest average path distance:
+```{r}
+which(mean == min(mean))
+rownames(pathmatrix)[which.min(mean)]
+```
+**Intel Capital has the lowest average path distance. So it's verified that the firm with the highest closeness centrality also has the lowest average path distance.**
+
+## Question 1 -- C
+Compute the average shortest path length for all firms:
+```{r}
+mean_distance(investg, directed = FALSE, unconnected = FALSE)
+```
+**The outcome is around 974. I think the number is very high because there're so many investors (more than 10k) in this network but every round of investment won't have investors more than 30, so the connection among investors tend to be sparse, lots of investors are not connected with each other, which makes the path pretty long.**
+
+## Question 2 -- A
+Extract year and month information from date time, and sort data by date and investors, exclude duplicates over month: 
+```{r}
+relation2 <- relation
+relation2$date <- substr(relation2$date,0,7)
+relation2 <- relation2[order(relation2[,1],relation2[,2],relation2[,3]),]
+relation2 <- relation2[!duplicated(relation2),]
+```
+Manipulate the format of date, transfer date into integer:
+```{r}
+relation2$date <- as.integer(gsub('-','',relation2$date))
+```
+Calculate the average coreness of firms in the network over time:
+```{r}
+monthcore <- c()
+for (i in unique(relation2$date)) {
+  index <- last(which(relation2$date == i))
+  monthedgelist <- cbind.data.frame(a=relation2[1:index,2],b=relation2[1:index,3])
+  monthg <- graph.data.frame(unique(monthedgelist), directed = FALSE)
+  monthcore <- append(monthcore,mean(coreness(monthg)))
+}
+monthcore
+```
+Plot Month against Average Coreness:
+```{r}
+library(ggplot2)
+ggplot() + geom_line(aes(y=monthcore, x=1:length(monthcore))) + labs(title ="The average coreness of firms in the network over month", x = "Months", y = "Average Coreness") + theme_minimal()
+```
+
+## Question 2 -- B
+For a relationship in a month, I check if this relationship shows again in the following 10 years, if it doesn't then this relationship should be deleted. **It worth mentioning that, I didn't include relationship shows after July 2004**, because we only have data before July 2014, so we don't have enough data for us to check if a relationship renew or not within 10 years after July 2004.
+<br/>Find the index of ties not renewed within 10 years:
+```{r}
+decayindex <- c()
+
+findmonth <- function(x,y){
+  if (sum(relation2$date == (relation2$date[y] + 999 - x)) != 0) {
+    return(x)
+  }
+}
+
+for (i in 1:last(which(relation2$date == 200407))) {
+  validmonth <- min(unlist(mapply(findmonth, x=c(0:350),  y=i))) 
+  a <- last(which(relation2$date == relation2$date[i]))+1
+  b <- last(which(relation2$date == (relation2$date[i] + 999 - validmonth)))
+  if (sum(relation2[a:b,2] == relation2[i,2] & relation2[a:b,3] == relation2[i,3]) == 0) {
+    decayindex <- append(decayindex, i)
+  }
+}
+```
+Based on my understanding of "decay", we need to delete the decayed tie after 10 years, not the month it was created. For example, if a tie is decayed and it was created on July 2001, then we should delete this tie on July 2011. I did this when computing the coreness.
+<br/>Create a new dataframe only with decayed ties and add 1000 (which means 10 years) to the date:
+```{r}
+relation3 <- relation2
+decaytie <- cbind.data.frame(relation3[decayindex,], decayindex)
+decaytie$date <- decaytie$date + 1000
+```
+Calculate the average coreness of firms in the network over time, meanwhile, delete decayed ties in a certain month:
+```{r results='hide'}
+dmonthcore <- c()
+for (i in unique(relation3$date)) {
+  index <- last(which(relation3$date == i))
+  if (sum(decaytie$date <= i) > 0) {
+    relation3 <- relation3[-decaytie[which(decaytie$date <= i),]$decayindex,]
+    decaytie <- decaytie[-which(decaytie$date <= i),]
+    decaytie$decayindex <- decaytie$decayindex - sum(decaytie$date <= i)
+  }
+  monthedgelist <- cbind.data.frame(a=relation3[1:index,2],b=relation3[1:index,3])
+  monthg <- graph.data.frame(unique(monthedgelist), directed = FALSE)
+  dmonthcore <- append(dmonthcore,mean(coreness(monthg, mode = "all")))
+}
+```
+
+```{r}
+dmonthcore
+```
+
+Plot Month against Average Coreness:
+```{r}
+ggplot() + geom_line(aes(y=dmonthcore, x=1:length(dmonthcore))) + labs(title ="The average coreness of firms in the network over month with decay", x = "Months", y = "Average Coreness") + theme_minimal()
+```
+**The two plots looks very similar, the difference is that the average coreness decreases dramatically during the 180th month to the 225th month in the second plot. While 10 years/120 months before that period is the 60th month to the 105th month, during that period we can see a soar of average coreness. This indicates that, during the 60th month to the 105th month there were lots of investments and lots of investors invested some companies together, but after that the connection didn't renewed within 10 years, thus we can see a decrease during the 180th month to the 225th month, because such ties decayed.** 
+<br/>**Overall, the average coreness tends to decrease after the 175th month in both plots, this indicates that after the 175th month, the network become sparser and sparser, probably that's because there are more and more new investors come in.**
+
+## Question 3
+**Evidence 1:** I think the average coreness in question 2-A can already shows this graph is a core-periphery network, because the very high average coreness can indicate a strong core.
+<br/>**Evidence 2:** I calculated the average betweenness of the network and the highest betweenness in the network, the outcome is quite low, which means there're no strong brokers in this network. Thus, this network tend to be core-periphery, because if this network has some distinct clusters, then there should be several strong brokers to connect them together, but actually there's not.
+```{r}
+timeedgelist <- cbind.data.frame(a=relation2[,2],b=relation2[,3])
+timeg <- graph.data.frame(unique(timeedgelist), directed = FALSE)
+between <- betweenness(timeg, v = V(timeg), directed = FALSE, normalized = TRUE)
+mean(between)
+max(between)
+```
+**Evidence 3:** I plot the network, from the plot, I think the network is pretty core-periphery.
+```{r}
+plot(timeg, vertex.label=NA, vertex.color = "SkyBlue2", vertex.frame.color="SkyBlue2", vertex.size = 4, edge.width = 0.05)
+```
+
+## Question 4 -- A
+Load performance data, exclude Inc/LLC/LTD/LP in investors' names:
+```{r}
+performance <- read.csv("C:/MSBA/MSBA Files/socialnetwork/homework/hw2/Venture_capital_firm_outcomes.csv")
+performance <- performance %>% select(firm_name, year, successful_investments, out_of_business)
+performance[,1] <- gsub(' Inc', '', performance[,1])
+performance[,1] <- gsub(' Inc.', '', performance[,1])
+performance[,1] <- gsub(' LLC', '', performance[,1])
+performance[,1] <- gsub(' Ltd', '', performance[,1])
+performance[,1] <- gsub(' L.L.C', '', performance[,1])
+performance[,1] <- gsub(' L.L.C.', '', performance[,1])
+performance[,1] <- gsub(' LP', '', performance[,1])
+```
+Calculate closeness, betweenness and eigen centrality over year:
+```{r}
+relation4 <- relation2
+relation4$date <- substr(relation4$date,0,4)
+```
+
+```{r results='hide'}
+close <- c()
+dfclose <- data.frame()
+betweent <- c()
+dfbetween <- data.frame()
+eigent <- c()
+dfeigen <- data.frame()
+for (i in unique(relation4$date)) {
+  sub <- relation4[1:last(which(relation4$date == i)),]
+  tedgelist <- cbind.data.frame(sub[,2],sub[,3])
+  tg <- graph.data.frame(tedgelist, directed = FALSE)
+  close<- closeness(tg, vids = V(tg), mode ="all", normalized = TRUE)
+  ag1 <- dfclose
+  dfclose <- cbind.data.frame(close,year = i,make.row.names = names(close))
+  dfclose <- rbind.data.frame(ag1,dfclose)
+  betweent <- betweenness(tg, v = V(tg), directed = FALSE, normalized = TRUE)
+  ag2 <- dfbetween
+  dfbetween <- cbind.data.frame(betweent,year = i,make.row.names = names(betweent))
+  dfbetween <- rbind.data.frame(ag2,dfbetween)
+  eigent <- eigen_centrality(tg, directed = FALSE)[["vector"]]
+  ag3 <- dfeigen
+  dfeigen <- cbind.data.frame(eigent,year = i,make.row.names = names(eigent))
+  dfeigen <- rbind.data.frame(ag3,dfeigen)
+}
+```
+Combine performance outcomes and values of centrality measures:
+```{r results='hide'}
+dfclose$year <- as.integer(as.character(dfclose$year))
+dfbetween$year <- as.integer(as.character(dfbetween$year))
+dfeigen$year <- as.integer(as.character(dfeigen$year))
+sperformance <- performance %>% select(firm_name, year, successful_investments)
+sperformance <- inner_join(sperformance,dfclose,by = c("year" = "year", "firm_name" = "make.row.names")) %>% inner_join(., dfbetween, by = c("year" = "year", "firm_name" = "make.row.names")) %>% inner_join(.,dfeigen, by = c("year" = "year", "firm_name" = "make.row.names"))
+```
+Compute correlation of success and different measures of centrality of top 10% companies of each measure. I choose top 10% to make sure these companies are relatively at the center:
+```{r}
+sperformance <- sperformance %>% group_by(firm_name) %>% summarise(close = mean(close), betweent = mean(betweent), eigent = mean(eigent), successful_investments = mean(successful_investments)) 
+
+sctop <- sperformance[order(sperformance$close),]
+sctop <- tail(sctop, n=(length(sperformance$firm_name) / 10))
+spcor <- sctop %>% select(successful_investments,close) 
+cor(spcor$successful_investments, spcor$close)
+
+sbtop <- sperformance[order(sperformance$betweent),]
+sbtop <- tail(sbtop, n=(length(sperformance$firm_name) / 10))
+spcor <- sbtop %>% select(successful_investments,betweent) 
+cor(spcor$successful_investments, spcor$betweent)
+
+setop <- sperformance[order(sperformance$eigent),]
+setop <- tail(setop, n=(length(sperformance$firm_name) / 10))
+spcor <- setop %>% select(successful_investments,eigent) 
+cor(spcor$successful_investments, spcor$eigent)
+```
+**From the outcome, it shows that higher centrality is positively related to successful investments when the centrality is relatively strong. Thus, a venture capital firm being at the center of the network tends to have more successful investments.**
+
+## Question 4 -- B
+Combine performance outcomes and values of centrality measures:
+```{r results='hide'}
+bperformance <- performance %>% select(firm_name, year, out_of_business)
+bperformance <- inner_join(bperformance,dfclose,by = c("year" = "year", "firm_name" = "make.row.names")) %>% inner_join(., dfbetween, by = c("year" = "year", "firm_name" = "make.row.names")) %>% inner_join(.,dfeigen, by = c("year" = "year", "firm_name" = "make.row.names"))
+```
+
+Compute correlation of out of business and different measures of centrality of top 10% companies of each measure. I choose top 10% to make sure these companies are relatively at the center:
+```{r}
+bperformance <- bperformance %>% group_by(firm_name) %>% summarise(close = mean(close), betweent = mean(betweent), eigent = mean(eigent), out_of_business = sum(out_of_business))
+
+bctop <- bperformance[order(bperformance$close),]
+bctop <- tail(bctop, n=(length(bperformance$firm_name) / 10))
+bpcor <- bctop %>% select(out_of_business,close) 
+cor(bpcor$out_of_business, bpcor$close)
+
+bbtop <- bperformance[order(bperformance$betweent),]
+bbtop <- tail(bbtop, n=(length(bperformance$firm_name) / 10))
+bpcor <- bbtop %>% select(out_of_business,betweent) 
+cor(bpcor$out_of_business, bpcor$betweent)
+
+betop <- bperformance[order(bperformance$eigent),]
+betop <- tail(betop, n=(length(bperformance$firm_name) / 10))
+bpcor <- betop %>% select(out_of_business,eigent) 
+cor(bpcor$out_of_business, bpcor$eigent)
+```
+**From the outcome, it shows that higher centrality is negatively related to going out of business when the centrality is relatively strong. Thus a venture capital firm being at the center of the network is less likely to go out of business.**
